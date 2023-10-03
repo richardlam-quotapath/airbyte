@@ -32,7 +32,7 @@ class ZohoCrmStream(HttpStream, ABC):
         pagination = response.json()["info"]
         if not pagination["more_records"]:
             return None
-        return {"page": pagination["page"] + 1}
+        return {"page_token": pagination["next_page_token"]}
 
     def request_params(
         self, stream_state: Mapping[str, Any], stream_slice: Mapping[str, any] = None, next_page_token: Mapping[str, Any] = None
