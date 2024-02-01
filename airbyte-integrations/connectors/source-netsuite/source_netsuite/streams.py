@@ -141,15 +141,22 @@ class NetsuiteStream(HttpStream, ABC):
         return params
 
     def fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
-        url = record["links"][0]["href"]
-        args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
-        prep_req = self._session.prepare_request(requests.Request(**args))
-        response = self._send_request(prep_req, request_kwargs)
-        # sometimes response.status_code == 400,
-        # but contains json elements with error description,
-        # to avoid passing it as {TYPE: RECORD}, we filter response by status
-        if response.status_code == requests.codes.ok:
-            yield response.json()
+        try:
+            url = record["links"][0]["href"]
+            args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
+            prep_req = self._session.prepare_request(requests.Request(**args))
+            self.logger.info(f"Sending request for {url} to fetch record.")
+            response = self._send_request(prep_req, request_kwargs)
+
+            # sometimes response.status_code == 400,
+            # but contains json elements with error description,
+            # to avoid passing it as {TYPE: RECORD}, we filter response by status
+            if response.status_code == requests.codes.ok:
+                return response.json()
+        # Sometimes the url for the record is not valid and the request fails, just skip that record in this case
+        except Exception as e:
+            self.logger.error(f"Error while fetching data for {url} skipping record.", e)
+            return None
 
     def parse_response(
         self,
@@ -159,13 +166,13 @@ class NetsuiteStream(HttpStream, ABC):
         next_page_token: Mapping[str, Any] = None,
         **kwargs,
     ) -> Iterable[Mapping]:
-
         records = response.json().get("items")
         request_kwargs = self.request_kwargs(stream_slice, next_page_token)
         if records:
             for record in records:
                 # make sub-requests for each record fetched
-                yield from self.fetch_record(record, request_kwargs)
+                if (record := self.fetch_record(record, request_kwargs)) is not None:
+                    yield record
 
     def should_retry(self, response: requests.Response) -> bool:
         if response.status_code in NETSUITE_ERRORS_MAPPING.keys():
