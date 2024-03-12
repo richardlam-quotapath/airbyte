@@ -6,7 +6,8 @@
 from abc import ABC
 from datetime import date, datetime, timedelta
 from json import JSONDecodeError
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, Union
+import logging
+from typing import Any, Iterable, Mapping, MutableMapping, Optional, Tuple, Union
 
 import requests
 from airbyte_cdk.sources.streams.http import HttpStream
@@ -209,6 +210,29 @@ class NetsuiteStream(HttpStream, ABC):
             yield from super().read_records(stream_slice=stream_slice, stream_state=stream_state, **kwargs)
         except DateFormatExeption:
             """continue trying other formats, until the list is exhausted"""
+
+    def _fetch_next_page(
+        self,
+        stream_slice: Optional[Mapping[str, Any]] = None,
+        stream_state: Optional[Mapping[str, Any]] = None,
+        next_page_token: Optional[Mapping[str, Any]] = None,
+    ) -> Tuple[requests.PreparedRequest, requests.Response]:
+        request_headers = self.request_headers(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
+        request_params = self.request_params(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
+        path = self.path(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
+        request = self._create_prepared_request(
+            path=path,
+            headers=dict(request_headers, **self.authenticator.get_auth_header()),
+            params=request_params,
+            json=self.request_body_json(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token),
+            data=self.request_body_data(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token),
+        )
+        request_kwargs = self.request_kwargs(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
+
+        self.logger.info(f"Request Params: {request_params}")
+        self.logger.info(f"Sending Request for : {path}")
+        response = self._send_request(request, request_kwargs)
+        return request, response
 
 
 class IncrementalNetsuiteStream(NetsuiteStream):
