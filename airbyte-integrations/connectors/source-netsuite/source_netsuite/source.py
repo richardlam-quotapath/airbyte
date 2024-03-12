@@ -110,6 +110,8 @@ class SourceNetsuite(AbstractSource):
         max_retry: int = 3,
     ) -> Union[NetsuiteStream, IncrementalNetsuiteStream, CustomIncrementalNetsuiteStream]:
 
+        self.logger.info(f"Generating Stream for {object_name}")
+
         input_args = {
             "auth": auth,
             "object_name": object_name,
@@ -121,11 +123,18 @@ class SourceNetsuite(AbstractSource):
         schema = schemas[object_name]
         schema_props = schema.get("properties")
         if schema_props:
-            if INCREMENTAL_CURSOR in schema_props.keys():
+            # Unblocks Alvaria for now (ch61340)
+            if object_name == "employee":
+                self.logger.info("Initializing Full Refresh Stream for Employee object")
+                return NetsuiteStream(**input_args)
+            elif INCREMENTAL_CURSOR in schema_props.keys():
+                self.logger.info(f"{INCREMENTAL_CURSOR} found in schema. Initializing Incremental Stream for {object_name}")
                 return IncrementalNetsuiteStream(**input_args)
             elif CUSTOM_INCREMENTAL_CURSOR in schema_props.keys():
+                self.logger.info(f"{CUSTOM_INCREMENTAL_CURSOR} found in schema. Initializing Custom Incremental Stream for {object_name}")
                 return CustomIncrementalNetsuiteStream(**input_args)
             else:
+                self.logger.info(f"No cursor field was found. Initializing Full Refresh Stream for {object_name}")
                 # all other streams are full_refresh
                 return NetsuiteStream(**input_args)
         else:
