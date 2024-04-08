@@ -13,7 +13,12 @@ from airbyte_cdk.sources import AbstractSource
 from airbyte_cdk.sources.streams import Stream
 from requests_oauthlib import OAuth1
 from source_netsuite.constraints import CUSTOM_INCREMENTAL_CURSOR, INCREMENTAL_CURSOR, META_PATH, RECORD_PATH, SCHEMA_HEADERS
-from source_netsuite.streams import CustomIncrementalNetsuiteStream, IncrementalNetsuiteStream, NetsuiteStream
+from source_netsuite.streams import (
+    CustomIncrementalNetsuiteStream,
+    IncrementalNetsuiteStream,
+    LineItemsIncrementalNetsuiteStream,
+    NetsuiteStream,
+)
 
 
 class SourceNetsuite(AbstractSource):
@@ -55,8 +60,12 @@ class SourceNetsuite(AbstractSource):
                 return False, f'Duplicate record type: {", ".join(duplicates)}'
             # check connectivity to all provided `object_types`
             for object in object_types:
+
+                # Line items will use the parent object's data
+                object_name = object.lower().removesuffix("_line_items")
+                
                 try:
-                    response = session.get(url=base_url + RECORD_PATH + object.lower(), params={"limit": 1})
+                    response = session.get(url=base_url + RECORD_PATH + object_name, params={"limit": 1})
                     response.raise_for_status()
                     return True, None
                 except requests.exceptions.HTTPError as e:
@@ -80,6 +89,11 @@ class SourceNetsuite(AbstractSource):
             if isinstance(object_names, list):
                 schemas = {}
                 for object_name in object_names:
+                    if object_name.endswith("_line_items"):
+                        schemas.update(
+                            **self.fetch_schema(object_name.removesuffix("_line_items"), session, metadata_url, override_name=object_name)
+                        )
+                        continue
                     schemas.update(**self.fetch_schema(object_name, session, metadata_url))
                 return schemas
             elif isinstance(object_names, str):
@@ -91,11 +105,13 @@ class SourceNetsuite(AbstractSource):
         except JSONDecodeError as e:
             self.logger.error(f"Unexpected output while fetching the object schema. Full error: {e.__repr__()}")
 
-    def fetch_schema(self, object_name: str, session: requests.Session, metadata_url: str) -> Mapping[str, Any]:
+    def fetch_schema(self, object_name: str, session: requests.Session, metadata_url: str, override_name: str = "") -> Mapping[str, Any]:
         """
         Calls the API for specific object type and returns schema as a dict.
         """
-        return {object_name.lower(): session.get(metadata_url + object_name, headers=SCHEMA_HEADERS).json()}
+        return {
+            override_name if override_name else object_name.lower(): session.get(metadata_url + object_name, headers=SCHEMA_HEADERS).json()
+        }
 
     def generate_stream(
         self,
@@ -110,8 +126,6 @@ class SourceNetsuite(AbstractSource):
         max_retry: int = 3,
     ) -> Union[NetsuiteStream, IncrementalNetsuiteStream, CustomIncrementalNetsuiteStream]:
 
-        self.logger.info(f"Generating Stream for {object_name}")
-
         input_args = {
             "auth": auth,
             "object_name": object_name,
@@ -122,19 +136,26 @@ class SourceNetsuite(AbstractSource):
 
         schema = schemas[object_name]
         schema_props = schema.get("properties")
+
+        is_line_item = object_name.endswith("_line_items")
+
         if schema_props:
             # Unblocks Alvaria for now (ch61340)
             if object_name == "employee":
-                self.logger.info("Initializing Full Refresh Stream for Employee object")
+                logging.info("Initializing Full Refresh Stream for Employee object")
                 return NetsuiteStream(**input_args)
+            elif is_line_item:
+                line_item_name = object_name
+                input_args["object_name"] = object_name.removesuffix("_line_items")
+                return LineItemsIncrementalNetsuiteStream(**input_args, line_item_name=line_item_name)
             elif INCREMENTAL_CURSOR in schema_props.keys():
-                self.logger.info(f"{INCREMENTAL_CURSOR} found in schema. Initializing Incremental Stream for {object_name}")
+                logging.info(f"{INCREMENTAL_CURSOR} found in schema. Initializing Incremental Stream for {object_name}")
                 return IncrementalNetsuiteStream(**input_args)
             elif CUSTOM_INCREMENTAL_CURSOR in schema_props.keys():
-                self.logger.info(f"{CUSTOM_INCREMENTAL_CURSOR} found in schema. Initializing Custom Incremental Stream for {object_name}")
+                logging.info(f"{CUSTOM_INCREMENTAL_CURSOR} found in schema. Initializing Custom Incremental Stream for {object_name}")
                 return CustomIncrementalNetsuiteStream(**input_args)
             else:
-                self.logger.info(f"No cursor field was found. Initializing Full Refresh Stream for {object_name}")
+                logging.info(f"No cursor field was found. Initializing Full Refresh Stream for {object_name}")
                 # all other streams are full_refresh
                 return NetsuiteStream(**input_args)
         else:
@@ -157,6 +178,13 @@ class SourceNetsuite(AbstractSource):
         base_url = self.base_url(config)
         metadata_url = base_url + META_PATH
         object_names = config.get("object_types")
+
+        # If customer selects invoice, salesorder, or creditmemo, automatically append line item objects to list
+        line_item_mapping = {"invoice": "invoice_line_items", "salesorder": "salesorder_line_items", "creditmemo": "creditmemo_line_items"}
+
+        for base_object, line_item in line_item_mapping.items():
+            if base_object in object_names and line_item not in object_names:
+                object_names.append(line_item)
 
         # retrieve all record types if `object_types` config field is not specified
         if not object_names:

@@ -142,22 +142,15 @@ class NetsuiteStream(HttpStream, ABC):
         return params
 
     def fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
-        try:
-            url = record["links"][0]["href"]
-            args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
-            prep_req = self._session.prepare_request(requests.Request(**args))
-            self.logger.info(f"Sending request for {url} to fetch record.")
-            response = self._send_request(prep_req, request_kwargs)
-
-            # sometimes response.status_code == 400,
-            # but contains json elements with error description,
-            # to avoid passing it as {TYPE: RECORD}, we filter response by status
-            if response.status_code == requests.codes.ok:
-                return response.json()
-        # Sometimes the url for the record is not valid and the request fails, just skip that record in this case
-        except Exception as e:
-            self.logger.error(f"Error while fetching data for {url} skipping record.", e)
-            return None
+        url = record["links"][0]["href"]
+        args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
+        prep_req = self._session.prepare_request(requests.Request(**args))
+        response = self._send_request(prep_req, request_kwargs)
+        # sometimes response.status_code == 400,
+        # but contains json elements with error description,
+        # to avoid passing it as {TYPE: RECORD}, we filter response by status
+        if response.status_code == requests.codes.ok:
+            yield response.json()
 
     def parse_response(
         self,
@@ -167,13 +160,13 @@ class NetsuiteStream(HttpStream, ABC):
         next_page_token: Mapping[str, Any] = None,
         **kwargs,
     ) -> Iterable[Mapping]:
+
         records = response.json().get("items")
         request_kwargs = self.request_kwargs(stream_slice, next_page_token)
         if records:
             for record in records:
                 # make sub-requests for each record fetched
-                if (record := self.fetch_record(record, request_kwargs)) is not None:
-                    yield record
+                yield from self.fetch_record(record, request_kwargs)
 
     def should_retry(self, response: requests.Response) -> bool:
         if response.status_code in NETSUITE_ERRORS_MAPPING.keys():
@@ -229,8 +222,8 @@ class NetsuiteStream(HttpStream, ABC):
         )
         request_kwargs = self.request_kwargs(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
 
-        self.logger.info(f"Request Params: {request_params}")
-        self.logger.info(f"Sending Request for : {path}")
+        logging.info(f"Request Params: {request_params}")
+        logging.info(f"Sending Request for : {path}")
         response = self._send_request(request, request_kwargs)
         return request, response
 
@@ -274,7 +267,16 @@ class IncrementalNetsuiteStream(NetsuiteStream):
         **kwargs,
     ) -> Iterable[Mapping]:
         records = super().parse_response(response, stream_state, stream_slice, next_page_token)
-        yield from self.filter_records_newer_than_state(stream_state, records)
+        new_records = self.filter_records_newer_than_state(stream_state, records)
+        for record in new_records:
+            if self.name in ["invoice", "creditmemo", "salesorder"]:
+                # Drop line items
+                try:
+                    record["item"]["items"] = []
+                except KeyError:
+                    yield record
+            yield record
+        return {}
 
     def get_updated_state(
         self,
@@ -312,6 +314,64 @@ class IncrementalNetsuiteStream(NetsuiteStream):
                 slice_end = next_day.strftime(self.default_datetime_format)
                 yield {"start": slice_start, "end": slice_end}
                 start = next_day
+
+
+class LineItemsIncrementalNetsuiteStream(IncrementalNetsuiteStream):
+
+    def __init__(self, auth: OAuth1, object_name: str, base_url: str, start_datetime: str, window_in_days: int, line_item_name: str):
+        self.line_item_name = line_item_name
+        super().__init__(auth, object_name, base_url, start_datetime, window_in_days)
+
+    @property
+    def name(self) -> str:
+        # The base object we're using for all the data fetching is the object_name,
+        # but the stream name should be the actual line item's name
+        return self.line_item_name
+
+    def get_json_schema(self, **kwargs) -> dict:
+        schema = self.get_schema(META_PATH + self.object_name)
+
+        raw_line_item_schema = schema["properties"]["item"]["properties"]["items"]["items"]
+        json_schema = self.build_schema(raw_line_item_schema)
+
+        # Make sure primary key & cursor field are present in schema
+        json_schema["properties"]["id"] = {"type" : "string"}
+        json_schema["properties"]["lastModifiedDate"] = {"type" : "string"}
+
+        # Special request from Roman: Add the id of the parent record to the line item so joins are easier
+        json_schema["properties"][f'{self.object_name}_id'] = {"type" : "string"}
+
+        return json_schema
+
+    def parse_response(
+        self,
+        response: requests.Response,
+        stream_state: Mapping[str, Any],
+        stream_slice: Mapping[str, Any] = None,
+        next_page_token: Mapping[str, Any] = None,
+        **kwargs,
+    ) -> Iterable[Mapping]:
+        # Get all parent records (invoice, salesorder, or creditmemo)
+        records = super().parse_response(response, stream_state, stream_slice, next_page_token)
+
+        # Filter to get newest ones
+        filtered_records = self.filter_records_newer_than_state(stream_state, records)
+
+        # Return the line items from parent records
+        for record in filtered_records:
+            line_items = record.get("item", {}).get("items", [])
+            for line_item_record in line_items:
+                # Add primary key to line item record
+                primary_key = f'{record["id"]}_{line_item_record["line"]}'
+                line_item_record["id"] = primary_key
+
+                # Special request from Roman: Add the id of the parent record to the line item so joins are easier
+                line_item_record[f'{self.object_name}_id'] = record["id"]
+
+                # Add cursor field for incremental streams
+                line_item_record[self.cursor_field] = record[self.cursor_field]
+
+                yield line_item_record
 
 
 class CustomIncrementalNetsuiteStream(IncrementalNetsuiteStream):
