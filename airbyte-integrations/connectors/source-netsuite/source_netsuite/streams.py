@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, MutableMapping, Optional, Tuple, Unio
 import requests
 from airbyte_cdk.sources.streams.http import HttpStream
 from requests_oauthlib import OAuth1
+from airbyte_cdk.sources.streams.http.exceptions import DefaultBackoffException, UserDefinedBackoffException
 from source_netsuite.constraints import (
     CUSTOM_INCREMENTAL_CURSOR,
     INCREMENTAL_CURSOR,
@@ -141,6 +142,56 @@ class NetsuiteStream(HttpStream, ABC):
             params.update(**next_page_token)
         return params
 
+    def _send(self, request: requests.PreparedRequest, request_kwargs: Mapping[str, Any]) -> requests.Response:
+        """
+        Wraps sending the request in rate limit and error handlers.
+        Please note that error handling for HTTP status codes will be ignored if raise_on_http_errors is set to False
+
+        This method handles two types of exceptions:
+            1. Expected transient exceptions e.g: 429 status code.
+            2. Unexpected transient exceptions e.g: timeout.
+
+        To trigger a backoff, we raise an exception that is handled by the backoff decorator. If an exception is not handled by the decorator will
+        fail the sync.
+
+        For expected transient exceptions, backoff time is determined by the type of exception raised:
+            1. CustomBackoffException uses the user-provided backoff value
+            2. DefaultBackoffException falls back on the decorator's default behavior e.g: exponential backoff
+
+        Unexpected transient exceptions use the default backoff parameters.
+        Unexpected persistent exceptions are not handled and will cause the sync to fail.
+        """
+        self.logger.debug(
+            "Making outbound API request", extra={"headers": request.headers, "url": request.url, "request_body": request.body}
+        )
+        self.logger.info("Session object's auth field:")
+        self.logger.info(self._session.auth)
+        response: requests.Response = self._session.send(request, **request_kwargs)
+
+        # Evaluation of response.text can be heavy, for example, if streaming a large response
+        # Do it only in debug mode
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(
+                "Receiving response", extra={"headers": response.headers, "status": response.status_code, "body": response.text}
+            )
+        if self.should_retry(response):
+            custom_backoff_time = self.backoff_time(response)
+            error_message = self.error_message(response)
+            if custom_backoff_time:
+                raise UserDefinedBackoffException(
+                    backoff=custom_backoff_time, request=request, response=response, error_message=error_message
+                )
+            else:
+                raise DefaultBackoffException(request=request, response=response, error_message=error_message)
+        elif self.raise_on_http_errors:
+            # Raise any HTTP exceptions that happened in case there were unexpected ones
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                self.logger.error(response.text)
+                raise exc
+        return response
+
     def fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
         url = record["links"][0]["href"]
         args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
@@ -171,6 +222,8 @@ class NetsuiteStream(HttpStream, ABC):
     def should_retry(self, response: requests.Response) -> bool:
         if response.status_code in NETSUITE_ERRORS_MAPPING.keys():
             message = response.json().get("o:errorDetails")
+
+            self.logger.info("Found error message", message)
             if isinstance(message, list):
                 error_code = message[0].get("o:errorCode")
                 detail_message = message[0].get("detail")
@@ -178,6 +231,9 @@ class NetsuiteStream(HttpStream, ABC):
 
                 if error_code in known_error.keys():
                     setattr(self, "raise_on_http_errors", False)
+
+                    if "INVALID_LOGIN" in error_code:
+                        return True
 
                     # handle data-format error
                     if "INVALID_PARAMETER" in error_code and "failed with date format" in detail_message:
