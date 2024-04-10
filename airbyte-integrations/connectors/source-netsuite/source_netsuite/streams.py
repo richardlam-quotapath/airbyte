@@ -142,60 +142,11 @@ class NetsuiteStream(HttpStream, ABC):
             params.update(**next_page_token)
         return params
 
-    def _send(self, request: requests.PreparedRequest, request_kwargs: Mapping[str, Any]) -> requests.Response:
-        """
-        Wraps sending the request in rate limit and error handlers.
-        Please note that error handling for HTTP status codes will be ignored if raise_on_http_errors is set to False
-
-        This method handles two types of exceptions:
-            1. Expected transient exceptions e.g: 429 status code.
-            2. Unexpected transient exceptions e.g: timeout.
-
-        To trigger a backoff, we raise an exception that is handled by the backoff decorator. If an exception is not handled by the decorator will
-        fail the sync.
-
-        For expected transient exceptions, backoff time is determined by the type of exception raised:
-            1. CustomBackoffException uses the user-provided backoff value
-            2. DefaultBackoffException falls back on the decorator's default behavior e.g: exponential backoff
-
-        Unexpected transient exceptions use the default backoff parameters.
-        Unexpected persistent exceptions are not handled and will cause the sync to fail.
-        """
-        self.logger.debug(
-            "Making outbound API request", extra={"headers": request.headers, "url": request.url, "request_body": request.body}
-        )
-        self.logger.info("Session object's auth field:")
-        self.logger.info(self._session.auth)
-        response: requests.Response = self._session.send(request, **request_kwargs)
-
-        # Evaluation of response.text can be heavy, for example, if streaming a large response
-        # Do it only in debug mode
-        if self.logger.isEnabledFor(logging.DEBUG):
-            self.logger.debug(
-                "Receiving response", extra={"headers": response.headers, "status": response.status_code, "body": response.text}
-            )
-        if self.should_retry(response):
-            custom_backoff_time = self.backoff_time(response)
-            error_message = self.error_message(response)
-            if custom_backoff_time:
-                raise UserDefinedBackoffException(
-                    backoff=custom_backoff_time, request=request, response=response, error_message=error_message
-                )
-            else:
-                raise DefaultBackoffException(request=request, response=response, error_message=error_message)
-        elif self.raise_on_http_errors:
-            # Raise any HTTP exceptions that happened in case there were unexpected ones
-            try:
-                response.raise_for_status()
-            except requests.HTTPError as exc:
-                self.logger.error(response.text)
-                raise exc
-        return response
-
     def fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
         url = record["links"][0]["href"]
         args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
         prep_req = self._session.prepare_request(requests.Request(**args))
+        self.logger.info(f"Sending request for {url} to fetch record")
         response = self._send_request(prep_req, request_kwargs)
         # sometimes response.status_code == 400,
         # but contains json elements with error description,
@@ -215,17 +166,37 @@ class NetsuiteStream(HttpStream, ABC):
         records = response.json().get("items")
         request_kwargs = self.request_kwargs(stream_slice, next_page_token)
         if records:
+            errored_records = []
             for record in records:
                 # make sub-requests for each record fetched
-                yield from self.fetch_record(record, request_kwargs)
+                try:
+                    yield from self.fetch_record(record, request_kwargs)
+                except Exception as e:
+                    url = record.get("links", [{}])[0].get("href")
+                    self.logger.info(f"Encountered the error below while fetching url {url}. Adding to error list.")
+                    self.logger.info(e)
+                    errored_records.append(record)
+                    continue
+            
+            if errored_records:
+                self.logger.info(f"BEGIN: Fetching {len(errored_records)} records in error list.")
+                for record in errored_records:
+                    try:
+                        yield from self.fetch_record(record, request_kwargs)
+                    except Exception as e:
+                        self.logger.info(f"Encountered error again while fetching url {url}. Skipping record.")
+                        continue
 
     def should_retry(self, response: requests.Response) -> bool:
         if response.status_code in NETSUITE_ERRORS_MAPPING.keys():
-            message = response.json().get("o:errorDetails")
+            self.logger.warn(f"Error occured, Response code {response.status_code}")
 
-            self.logger.info("Found error message", message)
+            message = response.json().get("o:errorDetails")
+            self.logger.warn(f'Error Details: {message}')
+
             if isinstance(message, list):
                 error_code = message[0].get("o:errorCode")
+                self.logger.warn(f'Error Code: {error_code}')
                 detail_message = message[0].get("detail")
                 known_error = NETSUITE_ERRORS_MAPPING.get(response.status_code)
 
@@ -233,6 +204,7 @@ class NetsuiteStream(HttpStream, ABC):
                     setattr(self, "raise_on_http_errors", False)
 
                     if "INVALID_LOGIN" in error_code:
+                        self.logger.warn(f'Invalid Login Error. Will attempt retry.')
                         return True
 
                     # handle data-format error
@@ -259,29 +231,6 @@ class NetsuiteStream(HttpStream, ABC):
             yield from super().read_records(stream_slice=stream_slice, stream_state=stream_state, **kwargs)
         except DateFormatExeption:
             """continue trying other formats, until the list is exhausted"""
-
-    def _fetch_next_page(
-        self,
-        stream_slice: Optional[Mapping[str, Any]] = None,
-        stream_state: Optional[Mapping[str, Any]] = None,
-        next_page_token: Optional[Mapping[str, Any]] = None,
-    ) -> Tuple[requests.PreparedRequest, requests.Response]:
-        request_headers = self.request_headers(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
-        request_params = self.request_params(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
-        path = self.path(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
-        request = self._create_prepared_request(
-            path=path,
-            headers=dict(request_headers, **self.authenticator.get_auth_header()),
-            params=request_params,
-            json=self.request_body_json(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token),
-            data=self.request_body_data(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token),
-        )
-        request_kwargs = self.request_kwargs(stream_state=stream_state, stream_slice=stream_slice, next_page_token=next_page_token)
-
-        logging.info(f"Request Params: {request_params}")
-        logging.info(f"Sending Request for : {path}")
-        response = self._send_request(request, request_kwargs)
-        return request, response
 
 
 class IncrementalNetsuiteStream(NetsuiteStream):
