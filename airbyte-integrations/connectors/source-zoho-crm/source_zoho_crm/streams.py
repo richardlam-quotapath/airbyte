@@ -24,6 +24,7 @@ EMPTY_BODY_STATUSES = (HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED)
 
 logger = logging.getLogger("airbyte")
 
+
 class ZohoCrmStream(HttpStream, ABC):
     primary_key: str = "id"
     module: ModuleMeta = None
@@ -46,7 +47,7 @@ class ZohoCrmStream(HttpStream, ABC):
         yield from data
 
     def path(self, *args, **kwargs) -> str:
-        fields = ",".join([field.api_name for field in self.module.fields][0:50]) # Note, limited to 50 fields at max
+        fields = ",".join([field.api_name for field in self.module.fields][0:50])  # Note, limited to 50 fields at max
         return f"/crm/v4/{self.module.api_name}?fields={fields}"
 
     def get_json_schema(self) -> Optional[Dict[Any, Any]]:
@@ -66,6 +67,14 @@ class ZohoCrmStream(HttpStream, ABC):
         except UnknownDataTypeException as exc:
             self.logger.warning(f"Unknown data type in module {self.module.api_name}, skipping. Details: {exc}")
             raise
+
+    def read_records(self, *args, **kwargs) -> Iterable[Mapping[str, Any]]:
+        logger.info(f"Beginning read_records for stream {self.name}.")
+        records = super().read_records(*args, **kwargs)
+        for record in records:
+            # This is going to be a large output, but worth it for debugging
+            logger.info(f"Found record {record}")
+            yield record
 
 
 class IncrementalZohoCrmStream(ZohoCrmStream):
@@ -88,21 +97,37 @@ class IncrementalZohoCrmStream(ZohoCrmStream):
         self._state = value
 
     def read_records(self, *args, **kwargs) -> Iterable[Mapping[str, Any]]:
+        """
+        4/17/2024 - Modified so its dynamically full refresh or incremental. If the cursor field is present then we will compare it to the
+        current state's cursor, otherwise we will always yield it if the cursor field is not present.
+        """
         logger.info(f"Beginning read_records for stream {self.name}.")
         records = super().read_records(*args, **kwargs)
+
+        current_cursor_value = datetime.datetime.fromisoformat(self.state[self.cursor_field])
+        new_cursor_value = current_cursor_value
+
         for record in records:
             try:
                 # This is going to be a large output, but worth it for debugging
                 logger.info(f"Found record {record}")
-                current_cursor_value = datetime.datetime.fromisoformat(self.state[self.cursor_field])
-                latest_cursor_value = datetime.datetime.fromisoformat(record[self.cursor_field])
-                new_cursor_value = max(latest_cursor_value, current_cursor_value)
-                self.state = {self.cursor_field: new_cursor_value.isoformat("T", "seconds")}
+
+                if self.cursor_field not in record:
+                    logger.info(f"Cursor field {self.cursor_field} not found in record. Yielding record.")
+                    yield record
+
+                if (latest_cursor_value := datetime.datetime.fromisoformat(record[self.cursor_field])) <= current_cursor_value:
+                    logger.info(f"Record is less than current cursor value {current_cursor_value}. Skipping record.")
+                    continue
+
+                new_cursor_value = max(latest_cursor_value, new_cursor_value)
                 yield record
             except Exception as e:
                 logger.warning("The error below occurred while reading a record. Skipping record.")
                 logger.warning(e)
                 continue
+
+        self.state = {self.cursor_field: new_cursor_value.isoformat("T", "seconds")}
 
 
 class ZohoStreamFactory:
