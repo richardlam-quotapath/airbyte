@@ -4,6 +4,7 @@
 
 import concurrent.futures
 import datetime
+import logging
 import math
 from abc import ABC
 from dataclasses import asdict
@@ -21,6 +22,7 @@ from .types import FieldMeta, ModuleMeta, ZohoPickListItem
 # but `.json()` will fail because the response body is empty
 EMPTY_BODY_STATUSES = (HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED)
 
+logger = logging.getLogger("airbyte")
 
 class ZohoCrmStream(HttpStream, ABC):
     primary_key: str = "id"
@@ -86,12 +88,21 @@ class IncrementalZohoCrmStream(ZohoCrmStream):
         self._state = value
 
     def read_records(self, *args, **kwargs) -> Iterable[Mapping[str, Any]]:
-        for record in super().read_records(*args, **kwargs):
-            current_cursor_value = datetime.datetime.fromisoformat(self.state[self.cursor_field])
-            latest_cursor_value = datetime.datetime.fromisoformat(record[self.cursor_field])
-            new_cursor_value = max(latest_cursor_value, current_cursor_value)
-            self.state = {self.cursor_field: new_cursor_value.isoformat("T", "seconds")}
-            yield record
+        logger.info(f"Beginning read_records for stream {self.name}.")
+        records = super().read_records(*args, **kwargs)
+        for record in records:
+            try:
+                # This is going to be a large output, but worth it for debugging
+                logger.info(f"Found record {record}")
+                current_cursor_value = datetime.datetime.fromisoformat(self.state[self.cursor_field])
+                latest_cursor_value = datetime.datetime.fromisoformat(record[self.cursor_field])
+                new_cursor_value = max(latest_cursor_value, current_cursor_value)
+                self.state = {self.cursor_field: new_cursor_value.isoformat("T", "seconds")}
+                yield record
+            except Exception as e:
+                logger.warning("The error below occurred while reading a record. Skipping record.")
+                logger.warning(e)
+                continue
 
 
 class ZohoStreamFactory:
@@ -119,6 +130,7 @@ class ZohoStreamFactory:
         module.update_from_dict(next(iter(module_meta_json), None))
 
     def produce(self) -> List[HttpStream]:
+        logger.info("Initializing modules metadata")
         modules = self._init_modules_meta()
         streams = []
 
@@ -136,11 +148,13 @@ class ZohoStreamFactory:
                 executor.map(lambda module: populate_module(module), batch)
 
         bases = (IncrementalZohoCrmStream,)
+        logger.info("Initializing streams")
         for module in modules:
             stream_cls_attrs = {"url_base": self.api.api_url, "module": module}
             stream_cls_name = f"Incremental{module.api_name}ZohoCRMStream"
             incremental_stream_cls = type(stream_cls_name, bases, stream_cls_attrs)
             stream = incremental_stream_cls(self.api.authenticator, config=self._config)
             if stream.get_json_schema():
+                logger.info(f"JSON Schema found for stream {stream.name}. Adding to streams list.")
                 streams.append(stream)
         return streams
