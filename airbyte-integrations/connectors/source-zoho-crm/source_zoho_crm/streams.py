@@ -115,6 +115,7 @@ class IncrementalZohoCrmStream(ZohoCrmStream):
                 if self.cursor_field not in record:
                     logger.info(f"Cursor field {self.cursor_field} not found in record. Yielding record.")
                     yield record
+                    continue
 
                 if (latest_cursor_value := datetime.datetime.fromisoformat(record[self.cursor_field])) <= current_cursor_value:
                     logger.info(f"Record is less than current cursor value {current_cursor_value}. Skipping record.")
