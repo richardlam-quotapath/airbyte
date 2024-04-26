@@ -30,6 +30,14 @@ class ChargifyStream(HttpStream, ABC):
         return f"https://{self._domain}"
 
     def next_page_token(self, response: requests.Response) -> Optional[Mapping[str, Any]]:
+        """
+        Unfortunately for most of the endpoints the response only returns a list of objects and doesn't usually give a clear
+        indicator that there are more pages to fetch.
+        So we have to assume if the length of the list is 200 (the max per page), then there could be more pages to fetch.
+
+        Only exception to this for some reason is invoices, the response actually is an object with a meta field so invoice's
+        next_page_token is handled differently.
+        """
 
         results = response.json()
 
@@ -53,8 +61,8 @@ class ChargifyStream(HttpStream, ABC):
         return next_page_token
 
     def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
-
-        yield response.json()
+        # Usually response.json() will be a list except for invoices
+        yield from response.json()
 
 
 class Customers(ChargifyStream):
@@ -91,6 +99,7 @@ class Subscriptions(ChargifyStream):
             yield subscription["subscription"]
 
 
+# Chargify API: https://developers.chargify.com/docs/api-docs/aa24a44561ce2-list-invoices
 class Invoices(ChargifyStream):
 
     # Invoices use uid instead of id, see schemas for the invoice schema
@@ -99,11 +108,24 @@ class Invoices(ChargifyStream):
     def path(self, **kwargs) -> str:
         return "invoices.json"
 
+    # Override base next_page_token b/c response returns an object for invoices (for some reason) instead of a list
+    def next_page_token(self, response: requests.Response) -> Optional[Mapping[str, Any]]:
+
+        results = response.json()
+        results = results.get("invoices", [])
+
+        if results:
+            if len(results) == self.PER_PAGE:
+                url_query = urlparse(response.url).query
+                query_params = parse_qs(url_query)
+
+                new_params = {param_name: param_value[0] for param_name, param_value in query_params.items()}
+                if "page" in new_params:
+                    new_params["page"] = int(new_params["page"]) + 1
+                return new_params
+
     def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
-        # Chargify API: https://developers.chargify.com/docs/api-docs/aa24a44561ce2-list-invoices
-        invoices = response.json()["invoices"]
-        for invoice in invoices:
-            yield invoice
+        yield from response.json().get("invoices", [])
 
 
 class Coupons(ChargifyStream):
@@ -211,5 +233,5 @@ class SourceChargify(AbstractSource):
             Components(authenticator, domain=config["domain"]),
             PaymentProfiles(authenticator, domain=config["domain"]),
             Products(authenticator, domain=config["domain"]),
-            Transactions(authenticator, domain=config["domain"])
+            Transactions(authenticator, domain=config["domain"]),
         ]
