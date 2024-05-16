@@ -28,6 +28,12 @@ logger = logging.getLogger("airbyte")
 class ZohoCrmStream(HttpStream, ABC):
     primary_key: str = "id"
     module: ModuleMeta = None
+    FIELDS_PER_QUERY = 50
+
+    def __init__(self, authenticator: "requests.auth.AuthBase" = None):
+        super().__init__(authenticator)
+        # Zoho's API limits us to querying for 50 fields max at a time, so we'll use a fields_cursor to page all the fields
+        self.fields_cursor = 0
 
     def next_page_token(self, response: requests.Response) -> Optional[Mapping[str, Any]]:
         if response.status_code in EMPTY_BODY_STATUSES:
@@ -42,12 +48,56 @@ class ZohoCrmStream(HttpStream, ABC):
     ) -> MutableMapping[str, Any]:
         return next_page_token or {}
 
-    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
-        data = [] if response.status_code in EMPTY_BODY_STATUSES else response.json()["data"]
-        yield from data
+    def parse_response(
+        self,
+        response: requests.Response,
+        stream_state: Mapping[str, Any],
+        stream_slice: Optional[Mapping[str, Any]] = None,
+        next_page_token: Optional[Mapping[str, Any]] = None,
+    ) -> Iterable[Mapping]:
+        self.logger.info(f"Parsing response. Next Page Token: {next_page_token}.")
+        main_data = [] if response.status_code in EMPTY_BODY_STATUSES else response.json()["data"]
+        self.fields_cursor = 0
+
+        total_fields = len(self.module.fields)
+        # Zoho's API limits us to querying for 50 fields max at a time. We should check if we have queried for all the fields or if we need to send
+        # sub-queries to get the additional fields.
+        if self.fields_cursor + self.FIELDS_PER_QUERY >= total_fields:
+            self.logger.info(f"All {total_fields} fields have been retrieved.")
+            yield from main_data
+        else:
+            self.logger.info(f"Additional fields need to be retrieved. Total number of fields: {total_fields}")
+
+            fields_data_lst: list[list[dict]] = []
+            while self.fields_cursor + self.FIELDS_PER_QUERY < total_fields:
+                self.fields_cursor += self.FIELDS_PER_QUERY
+
+                # We're using _fetch_next_page but with the fields_cursor incremented so the method will return the next set of fields
+                _, response = self._fetch_next_page(stream_slice=stream_slice, stream_state=stream_state, next_page_token=next_page_token)
+                fields_data = [] if response.status_code in EMPTY_BODY_STATUSES else response.json()["data"]
+                fields_data_lst.append(fields_data)
+
+            # Join all the data from the subqueries here and return one list containing records with all their fields
+            final_joined_data = []
+            for i in range(len(main_data)):
+                main_record = main_data[i]
+
+                # Combine all the fields from the subqueries into one object additional_fields_data
+                additional_fields_data = {}
+                for fields_data in fields_data_lst:
+                    main_record_additional_fields = fields_data[i]
+                    additional_fields_data = {**additional_fields_data, **main_record_additional_fields}
+
+                # Combine additional_fields_data with the main record
+                final_joined_data.append({**main_record, **additional_fields_data})
+
+            yield from final_joined_data
 
     def path(self, *args, **kwargs) -> str:
-        fields = ",".join([field.api_name for field in self.module.fields][0:50])  # Note, limited to 50 fields at max
+        fields = ",".join(
+            [field.api_name for field in self.module.fields][self.fields_cursor : self.fields_cursor + self.FIELDS_PER_QUERY]
+        )  # Note, limited to 50 fields at max (https://www.zoho.com/crm/developer/docs/api/v4/get-records.html)
+        self.logger.info(f"Sending request for fields: {fields}")
         return f"/crm/v4/{self.module.api_name}?fields={fields}"
 
     def get_json_schema(self) -> Optional[Dict[Any, Any]]:
@@ -69,11 +119,8 @@ class ZohoCrmStream(HttpStream, ABC):
             raise
 
     def read_records(self, *args, **kwargs) -> Iterable[Mapping[str, Any]]:
-        logger.info(f"Beginning read_records for stream {self.name}.")
         records = super().read_records(*args, **kwargs)
         for record in records:
-            # This is going to be a large output, but worth it for debugging
-            logger.info(f"Found record {record}")
             yield record
 
 
