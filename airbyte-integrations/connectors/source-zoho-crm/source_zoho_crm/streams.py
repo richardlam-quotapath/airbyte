@@ -119,6 +119,10 @@ class ZohoCrmStream(HttpStream, ABC):
             raise
 
     def read_records(self, *args, **kwargs) -> Iterable[Mapping[str, Any]]:
+        # Very important this is reset. read_records is actually done twice per record. Once to read one record, then 2nd time to actually read all records.
+        # So we want to reset it not just in the parse_response but every time read_records is called (which implies they want to resync from the beginning)
+        self.logger.info("Field cursor reset")
+        self.fields_cursor = 0
         records = super().read_records(*args, **kwargs)
         for record in records:
             yield record
