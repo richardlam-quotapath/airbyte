@@ -9,7 +9,7 @@ import math
 from abc import ABC
 from dataclasses import asdict
 from http import HTTPStatus
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional
 
 import requests
 from airbyte_cdk.sources.streams.http import HttpStream
@@ -17,6 +17,7 @@ from airbyte_cdk.sources.streams.http import HttpStream
 from .api import ZohoAPI
 from .exceptions import IncompleteMetaDataException, UnknownDataTypeException
 from .types import FieldMeta, ModuleMeta, ZohoPickListItem
+from airbyte_cdk.sources.streams.core import StreamData
 
 # 204 and 304 status codes are valid successful responses,
 # but `.json()` will fail because the response body is empty
@@ -118,11 +119,31 @@ class ZohoCrmStream(HttpStream, ABC):
             self.logger.warning(f"Unknown data type in module {self.module.api_name}, skipping. Details: {exc}")
             raise
 
+    def _read_pages(
+        self,
+        records_generator_fn: Callable[
+            [requests.PreparedRequest, requests.Response, Mapping[str, Any], Optional[Mapping[str, Any]]], Iterable[StreamData]
+        ],
+        stream_slice: Optional[Mapping[str, Any]] = None,
+        stream_state: Optional[Mapping[str, Any]] = None,
+    ) -> Iterable[StreamData]:
+        stream_state = stream_state or {}
+        pagination_complete = False
+        next_page_token = None
+        while not pagination_complete:
+            # Reset fields_cursor right before we fetch the next page of records
+            self.fields_cursor = 0
+            request, response = self._fetch_next_page(stream_slice, stream_state, next_page_token)
+            yield from records_generator_fn(request, response, stream_state, stream_slice)
+
+            next_page_token = self.next_page_token(response)
+            if not next_page_token:
+                pagination_complete = True
+
+        # Always return an empty generator just in case no records were ever yielded
+        yield from []
+
     def read_records(self, *args, **kwargs) -> Iterable[Mapping[str, Any]]:
-        # Very important this is reset. read_records is actually done twice per record. Once to read one record, then 2nd time to actually read all records.
-        # So we want to reset it not just in the parse_response but every time read_records is called (which implies they want to resync from the beginning)
-        self.logger.info("Field cursor reset")
-        self.fields_cursor = 0
         records = super().read_records(*args, **kwargs)
         for record in records:
             yield record
