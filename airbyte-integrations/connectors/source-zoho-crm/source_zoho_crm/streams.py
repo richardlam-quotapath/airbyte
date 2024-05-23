@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping,
 
 import requests
 from airbyte_cdk.sources.streams.http import HttpStream
+from airbyte_cdk.models import SyncMode
 
 from .api import ZohoAPI
 from .exceptions import IncompleteMetaDataException, UnknownDataTypeException
@@ -42,7 +43,9 @@ class ZohoCrmStream(HttpStream, ABC):
         pagination = response.json()["info"]
         if not pagination["more_records"]:
             return None
-        return {"page_token": pagination["next_page_token"]}
+        next_page_token = {"page_token": pagination["next_page_token"]}
+        logger.info(f"Next Page Token {next_page_token}")
+        return next_page_token
 
     def request_params(
         self, stream_state: Mapping[str, Any], stream_slice: Mapping[str, any] = None, next_page_token: Mapping[str, Any] = None
@@ -54,9 +57,12 @@ class ZohoCrmStream(HttpStream, ABC):
         response: requests.Response,
         stream_state: Mapping[str, Any],
         stream_slice: Optional[Mapping[str, Any]] = None,
+        # This is never going to be the next_page_token without our modifications below to the read_records and _read_pages functions :/,
+        # Based on the order that Airbyte has structured their calls, this function never has access to the next page token
+        # because the records_generator_fn only sets the first 3 args, so next_page_token is always null despite what the function definition has you believe.
+        # Only for this zoho source connector will the next_page_token be set since we're modifying the read_records and _read_pages calls to include it.
         next_page_token: Optional[Mapping[str, Any]] = None,
     ) -> Iterable[Mapping]:
-        self.logger.info(f"Parsing response. Next Page Token: {next_page_token}.")
         main_data = [] if response.status_code in EMPTY_BODY_STATUSES else response.json()["data"]
         self.fields_cursor = 0
 
@@ -134,7 +140,9 @@ class ZohoCrmStream(HttpStream, ABC):
             # Reset fields_cursor right before we fetch the next page of records
             self.fields_cursor = 0
             request, response = self._fetch_next_page(stream_slice, stream_state, next_page_token)
-            yield from records_generator_fn(request, response, stream_state, stream_slice)
+
+            # IMPORTANT: Add next_page_token here
+            yield from records_generator_fn(request, response, stream_state, stream_slice, next_page_token)
 
             next_page_token = self.next_page_token(response)
             if not next_page_token:
@@ -143,10 +151,21 @@ class ZohoCrmStream(HttpStream, ABC):
         # Always return an empty generator just in case no records were ever yielded
         yield from []
 
-    def read_records(self, *args, **kwargs) -> Iterable[Mapping[str, Any]]:
-        records = super().read_records(*args, **kwargs)
-        for record in records:
-            yield record
+    def read_records(
+        self,
+        sync_mode: SyncMode,
+        cursor_field: Optional[List[str]] = None,
+        stream_slice: Optional[Mapping[str, Any]] = None,
+        stream_state: Optional[Mapping[str, Any]] = None,
+    ) -> Iterable[StreamData]:
+        yield from self._read_pages(
+            # Important: Add next_page_token to lambda function
+            lambda req, res, state, slice, next_page_token: self.parse_response(
+                res, stream_slice=slice, stream_state=state, next_page_token=next_page_token
+            ),
+            stream_slice,
+            stream_state,
+        )
 
 
 class IncrementalZohoCrmStream(ZohoCrmStream):
