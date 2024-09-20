@@ -5,6 +5,7 @@
 
 from abc import ABC
 from datetime import date, datetime, timedelta
+from time import sleep
 from json import JSONDecodeError
 import logging
 from typing import Any, Iterable, Mapping, MutableMapping, Optional, Tuple, Union
@@ -14,11 +15,14 @@ from airbyte_cdk.sources.streams.http import HttpStream
 from requests_oauthlib import OAuth1
 from airbyte_cdk.sources.streams.http.exceptions import DefaultBackoffException, UserDefinedBackoffException
 from source_netsuite.constraints import (
+    CREATED_DATETIME,
+    CREATED_DATETIME_ALT,
     CUSTOM_INCREMENTAL_CURSOR,
     INCREMENTAL_CURSOR,
     META_PATH,
     NETSUITE_INPUT_DATE_FORMATS,
     NETSUITE_OUTPUT_DATETIME_FORMAT,
+    OBJECTS_USING_ALT_DATETIME_FIELD,
     RECORD_PATH,
     REFERAL_SCHEMA,
     REFERAL_SCHEMA_URL,
@@ -35,12 +39,18 @@ class NetsuiteStream(HttpStream, ABC):
         object_name: str,
         base_url: str,
         start_datetime: str,
+        end_datetime: str,
+        created_datetime: str,
         window_in_days: int,
+        retry_concurrency_limit: bool,
     ):
         self.object_name = object_name
         self.base_url = base_url
         self.start_datetime = start_datetime
+        self.end_datetime = end_datetime or datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.created_datetime = created_datetime or (date.today() - timedelta(days=365)).strftime("%m/%d/%Y")
         self.window_in_days = window_in_days
+        self.retry_concurrency_limit = retry_concurrency_limit or False
         self.schemas = {}  # store subschemas to reduce API calls
         super().__init__(authenticator=auth)
 
@@ -137,17 +147,16 @@ class NetsuiteStream(HttpStream, ABC):
         return lmd_datetime.strftime(self.default_datetime_format)
 
     def request_params(self, next_page_token: Mapping[str, Any] = None, **kwargs) -> MutableMapping[str, Any]:
-        params = {}
-        if next_page_token:
-            params.update(**next_page_token)
+        params = {**(next_page_token or {}), **{"limit": 500}}
         return params
 
     def fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
         url = record["links"][0]["href"]
         args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
         prep_req = self._session.prepare_request(requests.Request(**args))
-        self.logger.info(f"Sending request for {url} to fetch record")
         response = self._send_request(prep_req, request_kwargs)
+
+        self.logger.info(f"Status code {response.status_code} for request: {url}")
         # sometimes response.status_code == 400,
         # but contains json elements with error description,
         # to avoid passing it as {TYPE: RECORD}, we filter response by status
@@ -162,9 +171,12 @@ class NetsuiteStream(HttpStream, ABC):
         next_page_token: Mapping[str, Any] = None,
         **kwargs,
     ) -> Iterable[Mapping]:
+        records = response.json().get("items", [])
+        totalResults = response.json().get("totalResults")
+        self.logger.info(f"Total records found for current query: {totalResults}")
 
-        records = response.json().get("items")
         request_kwargs = self.request_kwargs(stream_slice, next_page_token)
+
         if records:
             errored_records = []
             for record in records:
@@ -177,7 +189,7 @@ class NetsuiteStream(HttpStream, ABC):
                     self.logger.info(e)
                     errored_records.append(record)
                     continue
-            
+
             if errored_records:
                 self.logger.info(f"BEGIN: Fetching {len(errored_records)} records in error list.")
                 for record in errored_records:
@@ -189,14 +201,14 @@ class NetsuiteStream(HttpStream, ABC):
 
     def should_retry(self, response: requests.Response) -> bool:
         if response.status_code in NETSUITE_ERRORS_MAPPING.keys():
-            self.logger.warn(f"Error occured, Response code {response.status_code}")
+            self.logger.warning(f"Error occured, Response code {response.status_code}")
 
             message = response.json().get("o:errorDetails")
-            self.logger.warn(f'Error Details: {message}')
+            self.logger.warning(f"Error Details: {message}")
 
             if isinstance(message, list):
                 error_code = message[0].get("o:errorCode")
-                self.logger.warn(f'Error Code: {error_code}')
+                self.logger.warning(f"NetSuite Error Code: {error_code}")
                 detail_message = message[0].get("detail")
                 known_error = NETSUITE_ERRORS_MAPPING.get(response.status_code)
 
@@ -204,15 +216,22 @@ class NetsuiteStream(HttpStream, ABC):
                     setattr(self, "raise_on_http_errors", False)
 
                     if "INVALID_LOGIN" in error_code:
-                        self.logger.warn(f'Invalid Login Error. Will attempt retry.')
+                        self.logger.warning(f"Invalid Login Error. Will attempt retry.")
+                        return True
+
+                    # Handle 429 CONCURRENCY_LIMIT_EXCEEDED by trying again after short break
+                    # This approach was borrowed from another NS connector contributor (see https://github.com/airbytehq/airbyte/pull/35747)
+                    if "CONCURRENCY_LIMIT_EXCEEDED" in error_code and self.retry_concurrency_limit is True:
+                        self.logger.warning(f"Concurrency Limit Error. Will attempt retry after sleep.")
+                        sleep(5)
                         return True
 
                     # handle data-format error
                     if "INVALID_PARAMETER" in error_code and "failed with date format" in detail_message:
-                        self.logger.warn(f"Stream `{self.name}`: cannot read using date format `{self.default_datetime_format}")
+                        self.logger.warning(f"Stream `{self.name}`: cannot read using date format `{self.default_datetime_format}")
                         self.index_datetime_format += 1
                         if self.index_datetime_format < len(NETSUITE_INPUT_DATE_FORMATS):
-                            self.logger.warn(f"Stream `{self.name}`: retry using next date format `{self.default_datetime_format}")
+                            self.logger.warning(f"Stream `{self.name}`: retry using next date format `{self.default_datetime_format}")
                             raise DateFormatExeption
                         else:
                             self.logger.error(f"DATE FORMAT exception. Cannot read using known formats {NETSUITE_INPUT_DATE_FORMATS}")
@@ -295,11 +314,21 @@ class IncrementalNetsuiteStream(NetsuiteStream):
     def request_params(
         self, stream_slice: Mapping[str, Any] = None, next_page_token: Mapping[str, Any] = None, **kwargs
     ) -> MutableMapping[str, Any]:
-        params = {**(next_page_token or {})}
+        # At most, our destination will be configured to write 500 records, so we don't need to fetch the entire 1000 default limit. This might help stabilize the syncs with less data per GET.
+        params = {**(next_page_token or {}), **{"limit": 500}}
+
+        # Determine the created date field based on the object type
+        created_datetime_field = CREATED_DATETIME_ALT if self.object_name in OBJECTS_USING_ALT_DATETIME_FIELD else CREATED_DATETIME
+
+        # Update query based on stream slice
         if stream_slice:
             params.update(
-                **{"q": f'{self.cursor_field} AFTER "{stream_slice["start"]}" AND {self.cursor_field} BEFORE "{stream_slice["end"]}"'}
+                {
+                    "q": f'{created_datetime_field} ON_OR_AFTER "{self.created_datetime}" AND {self.cursor_field} ON_OR_AFTER "{stream_slice["start"]}" AND {self.cursor_field} BEFORE "{stream_slice["end"]}"'
+                }
             )
+
+        self.logger.info(f"Request params -> {params}")
         return params
 
     def stream_slices(self, stream_state: Mapping[str, Any] = None, **kwargs) -> Iterable[Optional[Mapping[str, Any]]]:
@@ -309,12 +338,24 @@ class IncrementalNetsuiteStream(NetsuiteStream):
         slices = []
         state = self.get_state_value(stream_state)
         start = datetime.strptime(state, NETSUITE_OUTPUT_DATETIME_FORMAT).date()
+        end = datetime.strptime(self.end_datetime, NETSUITE_OUTPUT_DATETIME_FORMAT).date()
+
         # handle abnormal state values
         if start > date.today():
             return slices
         else:
-            while start <= date.today():
+            while start < end:
                 next_day = start + timedelta(days=self.window_in_days)
+                next_day = end if end < next_day else next_day
+
+                # Validate the dates
+                # NOTE: occasionally February is skipped over entirely with the slice, but it's difficult to repro and debug, so adding some validation and logging
+                try:
+                    datetime(next_day.year, next_day.month, next_day.day)
+                except ValueError:
+                    self.logger.info(f"Invalid date generated: {next_day}")
+                    continue
+
                 slice_start = start.strftime(self.default_datetime_format)
                 slice_end = next_day.strftime(self.default_datetime_format)
                 yield {"start": slice_start, "end": slice_end}
@@ -322,10 +363,22 @@ class IncrementalNetsuiteStream(NetsuiteStream):
 
 
 class LineItemsIncrementalNetsuiteStream(IncrementalNetsuiteStream):
-
-    def __init__(self, auth: OAuth1, object_name: str, base_url: str, start_datetime: str, window_in_days: int, line_item_name: str):
+    def __init__(
+        self,
+        auth: OAuth1,
+        object_name: str,
+        base_url: str,
+        start_datetime: str,
+        end_datetime: str,
+        created_datetime: str,
+        window_in_days: int,
+        retry_concurrency_limit: bool,
+        line_item_name: str,
+    ):
         self.line_item_name = line_item_name
-        super().__init__(auth, object_name, base_url, start_datetime, window_in_days)
+        super().__init__(
+            auth, object_name, base_url, start_datetime, end_datetime, created_datetime, window_in_days, retry_concurrency_limit
+        )
 
     @property
     def name(self) -> str:
@@ -340,11 +393,11 @@ class LineItemsIncrementalNetsuiteStream(IncrementalNetsuiteStream):
         json_schema = self.build_schema(raw_line_item_schema)
 
         # Make sure primary key & cursor field are present in schema
-        json_schema["properties"]["id"] = {"type" : "string"}
-        json_schema["properties"]["lastModifiedDate"] = {"type" : "string"}
+        json_schema["properties"]["id"] = {"type": "string"}
+        json_schema["properties"]["lastModifiedDate"] = {"type": "string"}
 
-        # Special request from Roman: Add the id of the parent record to the line item so joins are easier
-        json_schema["properties"][f'{self.object_name}_id'] = {"type" : "string"}
+        # Add the id of the parent record to the line item to join the line item back to the parent record
+        json_schema["properties"][f"{self.object_name}_id"] = {"type": "string"}
 
         return json_schema
 
@@ -358,7 +411,6 @@ class LineItemsIncrementalNetsuiteStream(IncrementalNetsuiteStream):
     ) -> Iterable[Mapping]:
         # Get all parent records (invoice, salesorder, or creditmemo)
         records = super().parse_response(response, stream_state, stream_slice, next_page_token)
-
         # Filter to get newest ones
         filtered_records = self.filter_records_newer_than_state(stream_state, records)
 
@@ -370,8 +422,8 @@ class LineItemsIncrementalNetsuiteStream(IncrementalNetsuiteStream):
                 primary_key = f'{record["id"]}_{line_item_record["line"]}'
                 line_item_record["id"] = primary_key
 
-                # Special request from Roman: Add the id of the parent record to the line item so joins are easier
-                line_item_record[f'{self.object_name}_id'] = record["id"]
+                # Add the id of the parent record to the line item to join the line item back to the parent record
+                line_item_record[f"{self.object_name}_id"] = record["id"]
 
                 # Add cursor field for incremental streams
                 line_item_record[self.cursor_field] = record[self.cursor_field]

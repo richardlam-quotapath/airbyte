@@ -38,6 +38,10 @@ SCHEMA_HEADERS: dict = {"Accept": "application/schema+json"}
 INCREMENTAL_CURSOR: str = "lastModifiedDate"
 CUSTOM_INCREMENTAL_CURSOR: str = "lastmodified"
 
+# ADDITIONAL REQUEST PARAM TO SUPPLEMENT AGGRESSIVE "lastModifiedDate" FILTER
+CREATED_DATETIME: str = "createdDate"
+CREATED_DATETIME_ALT: str = "dateCreated"  # Some objects use this format.. one more reason to hate NetSuite
+OBJECTS_USING_ALT_DATETIME_FIELD = ["customer"]
 
 NETSUITE_INPUT_DATE_FORMATS: list[str] = ["%m/%d/%Y", "%Y-%m-%d"]
 NETSUITE_OUTPUT_DATETIME_FORMAT: str = "%Y-%m-%dT%H:%M:%SZ"
