@@ -293,7 +293,6 @@ class ZohoUsersStream(HttpStream, ABC):
     
     @property
     def url_base(self) -> str:
-        print("URL ->", self.api.api_url)
         return self.api.api_url
 
     def path(self, *args, **kwargs) -> str:
