@@ -275,3 +275,53 @@ class ZohoStreamFactory:
                 logger.info(f"JSON Schema found for stream {stream.name}. Adding to streams list.")
                 streams.append(stream)
         return streams
+
+
+class ZohoUsersStream(HttpStream, ABC):
+    """
+    API docs: https://www.zoho.com/crm/developer/docs/api/v4/get-users.html
+    """
+    primary_key: str = "id"
+    
+    def __init__(self, config: Mapping[str, Any]):
+        self.api = ZohoAPI(config)
+        super().__init__(self.api.authenticator)
+
+    @property
+    def name(self) -> str:
+        return "users"
+    
+    @property
+    def url_base(self) -> str:
+        print("URL ->", self.api.api_url)
+        return self.api.api_url
+
+    def path(self, *args, **kwargs) -> str:
+        return f"/crm/v4/users"
+    
+    def request_params(self, next_page_token: Mapping[str, Any] = None, **kwargs) -> MutableMapping[str, Any]:
+        """
+        There are other options available like "AllUsers" 
+        """
+        return {
+            "type": "ActiveUsers",
+            **(next_page_token or {}),
+        }
+
+    def next_page_token(self, response: requests.Response) -> Optional[Mapping[str, Any]]:
+        """
+        This endpoint uses simple pagination
+        """
+        response_metadata = response.json().get("info", {})
+        has_more = bool(response_metadata.get("more_records", False))
+
+        if has_more:
+            current_page = int(response_metadata.get("page"))
+            return {"page": current_page + 1}
+
+        return None
+
+    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
+        user_records = response.json().get("users", [])
+        yield from user_records
+        
