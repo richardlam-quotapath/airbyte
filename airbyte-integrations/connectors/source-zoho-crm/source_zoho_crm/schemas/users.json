@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "country": { "type": ["string", "null"] },
+    "name_format__s": { "type": "string" },
+    "language": { "type": "string" },
+    "microsoft": { "type": "boolean" },
+    "$shift_effective_from": { "type": ["string", "null"] },
+    "Currency": { "type": "string" },
+    "id": { "type": "string" },
+    "state": { "type": ["string", "null"] },
+    "fax": { "type": ["string", "null"] },
+    "country_locale": { "type": "string" },
+    "sandboxDeveloper": { "type": "boolean" },
+    "zip": { "type": ["string", "null"] },
+    "decimal_separator": { "type": "string" },
+    "created_time": { "type": "string", "format": "date-time" },
+    "time_format": { "type": "string" },
+    "offset": { "type": "integer" },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "id": { "type": "string" }
+      }
+    },
+    "created_by": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "id": { "type": "string" }
+      }
+    },
+    "zuid": { "type": ["string", "null"] },
+    "full_name": { "type": "string" },
+    "phone": { "type": ["string", "null"] },
+    "dob": { "type": ["string", "null"] },
+    "sort_order_preference__s": { "type": ["string", "null"] },
+    "status": { "type": "string" },
+    "role": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "id": { "type": "string" }
+      }
+    },
+    "customize_info": {
+      "type": "object",
+      "properties": {
+        "notes_desc": { "type": "boolean" },
+        "show_right_panel": { "type": ["boolean", "null"] },
+        "bc_view": { "type": ["boolean", "null"] },
+        "show_home": { "type": "boolean" },
+        "show_detail_view": { "type": "boolean" },
+        "unpin_recent_item": { "type": ["boolean", "null"] }
+      }
+    },
+    "city": { "type": ["string", "null"] },
+    "signature": { "type": ["string", "null"] },
+    "locale": { "type": "string" },
+    "personal_account": { "type": "boolean" },
+    "Isonline": { "type": "boolean" },
+    "default_tab_group": { "type": "string" },
+    "Modified_By": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "id": { "type": "string" }
+      }
+    },
+    "street": { "type": ["string", "null"] },
+    "$current_shift": { "type": ["string", "null"] },
+    "alias": { "type": ["string", "null"] },
+    "theme": {
+      "type": "object",
+      "properties": {
+        "normal_tab": {
+          "type": "object",
+          "properties": {
+            "font_color": { "type": "string" },
+            "background": { "type": "string" }
+          }
+        },
+        "selected_tab": {
+          "type": "object",
+          "properties": {
+            "font_color": { "type": "string" },
+            "background": { "type": "string" }
+          }
+        },
+        "new_background": { "type": ["string", "null"] },
+        "background": { "type": "string" },
+        "screen": { "type": "string" },
+        "type": { "type": "string" }
+      }
+    },
+    "first_name": { "type": ["string", "null"] },
+    "email": { "type": "string" },
+    "status_reason__s": { "type": ["string", "null"] },
+    "website": { "type": ["string", "null"] },
+    "Modified_Time": { "type": "string", "format": "date-time" },
+    "$next_shift": { "type": ["string", "null"] },
+    "mobile": { "type": ["string", "null"] },
+    "last_name": { "type": ["string", "null"] },
+    "time_zone": { "type": "string" },
+    "number_separator": { "type": "string" },
+    "confirm": { "type": "boolean" },
+    "date_format": { "type": "string" },
+    "category": { "type": "string" }
+  }
+}
+
