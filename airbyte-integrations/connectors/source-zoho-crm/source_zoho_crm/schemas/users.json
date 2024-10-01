@@ -108,7 +108,36 @@
     "number_separator": { "type": "string" },
     "confirm": { "type": "boolean" },
     "date_format": { "type": "string" },
-    "category": { "type": "string" }
+    "category": { "type": "string" },
+    "territories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "Manager": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": ["name", "id"]
+          },
+          "Name": {
+            "type": "string"
+          },
+          "Reporting_To": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": true
+      }
+    }
   }
 }
-

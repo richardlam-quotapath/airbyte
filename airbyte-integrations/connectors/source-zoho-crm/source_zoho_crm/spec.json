@@ -63,6 +63,12 @@
         "description": "Choose your Edition of Zoho CRM to determine API Concurrency Limits",
         "enum": ["Free", "Standard", "Professional", "Enterprise", "Ultimate"],
         "default": "Free"
+      },
+      "fetch_user_territories": {
+        "title": "Fetch User Territories",
+        "type": "boolean",
+        "description": "Toggle this setting to fetch user territories",
+        "default": false
       }
     }
   }

@@ -286,6 +286,7 @@ class ZohoUsersStream(HttpStream, ABC):
 
     def __init__(self, config: Mapping[str, Any]):
         self.api = ZohoAPI(config)
+        self.fetch_user_territories = config["fetch_user_territories"]
         super().__init__(self.api.authenticator)
 
     @property
@@ -321,6 +322,30 @@ class ZohoUsersStream(HttpStream, ABC):
 
         return None
 
-    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
+    def parse_response(self, response: requests.Response, stream_state, **kwargs) -> Iterable[Mapping]:
         user_records = response.json().get("users", [])
+        request_kwargs = self.request_kwargs(stream_state)
+
+        # If enabled, fetch user territories by user id
+        if self.fetch_user_territories and user_records:
+            for user in user_records:
+                user_territories = self.get_user_territories(user["id"], request_kwargs)
+                if user_territories:
+                    user["territories"] = user_territories
+
         yield from user_records
+
+    def get_user_territories(self, user_id, request_kwargs) -> List[Mapping[str, Any]]:
+        """
+        API docs: https://www.zoho.com/crm/developer/docs/api/v6/get-user-territories.html
+        """
+        url = f"{self.url_base}{self.path()}/{user_id}/territories"
+        args = {"method": "GET", "url": url}
+        prep_req = self._session.prepare_request(requests.Request(**args))
+
+        try:
+            response = self._send_request(prep_req, request_kwargs)
+            return response.json().get("territories", {})
+        except Exception as e:
+            logger.warning(f"Unable to get user territories for user id {user_id}: {e}")
+            return []
