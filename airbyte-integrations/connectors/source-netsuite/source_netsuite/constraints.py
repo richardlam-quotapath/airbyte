@@ -43,5 +43,5 @@ CREATED_DATETIME: str = "createdDate"
 CREATED_DATETIME_ALT: str = "dateCreated"  # Some objects use this format.. one more reason to hate NetSuite
 OBJECTS_USING_ALT_DATETIME_FIELD = ["customer"]
 
-NETSUITE_INPUT_DATE_FORMATS: list[str] = ["%m/%d/%Y", "%Y-%m-%d", "%d-%b-%Y"]
+NETSUITE_INPUT_DATE_FORMATS: list[str] = ["%m/%d/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d/%m/%y"]
 NETSUITE_OUTPUT_DATETIME_FORMAT: str = "%Y-%m-%dT%H:%M:%SZ"
