@@ -48,7 +48,7 @@ class NetsuiteStream(HttpStream, ABC):
         self.base_url = base_url
         self.start_datetime = start_datetime
         self.end_datetime = end_datetime or datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-        self.created_datetime = created_datetime or (date.today() - timedelta(days=365)).strftime("%m/%d/%Y")
+        self.created_datetime = datetime.strptime(created_datetime, "%m/%d/%Y") if created_datetime else datetime.now() - timedelta(days=365)
         self.window_in_days = window_in_days
         self.retry_concurrency_limit = retry_concurrency_limit or False
         self.schemas = {}  # store subschemas to reduce API calls
@@ -235,6 +235,7 @@ class NetsuiteStream(HttpStream, ABC):
                             raise DateFormatExeption
                         else:
                             self.logger.error(f"DATE FORMAT exception. Cannot read using known formats {NETSUITE_INPUT_DATE_FORMATS}")
+                            return False
 
                     # handle other known errors
                     self.logger.error(f"Stream `{self.name}`: {error_code} error occured, full error message: {detail_message}")
@@ -319,12 +320,13 @@ class IncrementalNetsuiteStream(NetsuiteStream):
 
         # Determine the created date field based on the object type
         created_datetime_field = CREATED_DATETIME_ALT if self.object_name in OBJECTS_USING_ALT_DATETIME_FIELD else CREATED_DATETIME
+        formatted_created_datetime = self.created_datetime.strftime(self.default_datetime_format)
 
         # Update query based on stream slice
         if stream_slice:
             params.update(
                 {
-                    "q": f'{created_datetime_field} ON_OR_AFTER "{self.created_datetime}" AND {self.cursor_field} ON_OR_AFTER "{stream_slice["start"]}" AND {self.cursor_field} BEFORE "{stream_slice["end"]}"'
+                    "q": f'{created_datetime_field} ON_OR_AFTER "{formatted_created_datetime}" AND {self.cursor_field} ON_OR_AFTER "{stream_slice["start"]}" AND {self.cursor_field} BEFORE "{stream_slice["end"]}"'
                 }
             )
 
