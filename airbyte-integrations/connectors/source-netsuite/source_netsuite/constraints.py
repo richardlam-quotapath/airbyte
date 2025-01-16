@@ -37,6 +37,7 @@ SCHEMA_HEADERS: dict = {"Accept": "application/schema+json"}
 # INCREMENTAL CURSOR FIELDS
 INCREMENTAL_CURSOR: str = "lastModifiedDate"
 CUSTOM_INCREMENTAL_CURSOR: str = "lastmodified"
+CUSTOM_DATE_FIELD: str = "created"
 
 # ADDITIONAL REQUEST PARAM TO SUPPLEMENT AGGRESSIVE "lastModifiedDate" FILTER
 CREATED_DATETIME: str = "createdDate"

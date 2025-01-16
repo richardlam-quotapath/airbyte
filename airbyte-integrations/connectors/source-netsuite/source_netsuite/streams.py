@@ -17,6 +17,7 @@ from airbyte_cdk.sources.streams.http.exceptions import DefaultBackoffException,
 from source_netsuite.constraints import (
     CREATED_DATETIME,
     CREATED_DATETIME_ALT,
+    CUSTOM_DATE_FIELD,
     CUSTOM_INCREMENTAL_CURSOR,
     INCREMENTAL_CURSOR,
     META_PATH,
@@ -48,7 +49,9 @@ class NetsuiteStream(HttpStream, ABC):
         self.base_url = base_url
         self.start_datetime = start_datetime
         self.end_datetime = end_datetime or datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-        self.created_datetime = datetime.strptime(created_datetime, "%m/%d/%Y") if created_datetime else datetime.now() - timedelta(days=365)
+        self.created_datetime = (
+            datetime.strptime(created_datetime, "%m/%d/%Y") if created_datetime else datetime.now() - timedelta(days=365)
+        )
         self.window_in_days = window_in_days
         self.retry_concurrency_limit = retry_concurrency_limit or False
         self.schemas = {}  # store subschemas to reduce API calls
@@ -258,6 +261,11 @@ class IncrementalNetsuiteStream(NetsuiteStream):
     def cursor_field(self) -> str:
         return INCREMENTAL_CURSOR
 
+    @property
+    def created_date_field(self) -> str:
+        # Determine which created date field to use
+        return CREATED_DATETIME_ALT if self.object_name in OBJECTS_USING_ALT_DATETIME_FIELD else CREATED_DATETIME
+
     def filter_records_newer_than_state(
         self,
         stream_state: Mapping[str, Any] = None,
@@ -317,16 +325,14 @@ class IncrementalNetsuiteStream(NetsuiteStream):
     ) -> MutableMapping[str, Any]:
         # At most, our destination will be configured to write 500 records, so we don't need to fetch the entire 1000 default limit. This might help stabilize the syncs with less data per GET.
         params = {**(next_page_token or {}), **{"limit": 500}}
-
-        # Determine the created date field based on the object type
-        created_datetime_field = CREATED_DATETIME_ALT if self.object_name in OBJECTS_USING_ALT_DATETIME_FIELD else CREATED_DATETIME
+        # Format the created date query param to match the date format used in the records (determined through retry logic if initial format fails.
         formatted_created_datetime = self.created_datetime.strftime(self.default_datetime_format)
 
         # Update query based on stream slice
         if stream_slice:
             params.update(
                 {
-                    "q": f'{created_datetime_field} ON_OR_AFTER "{formatted_created_datetime}" AND {self.cursor_field} ON_OR_AFTER "{stream_slice["start"]}" AND {self.cursor_field} BEFORE "{stream_slice["end"]}"'
+                    "q": f'{self.created_date_field} ON_OR_AFTER "{formatted_created_datetime}" AND {self.cursor_field} ON_OR_AFTER "{stream_slice["start"]}" AND {self.cursor_field} BEFORE "{stream_slice["end"]}"'
                 }
             )
 
@@ -437,3 +443,7 @@ class CustomIncrementalNetsuiteStream(IncrementalNetsuiteStream):
     @property
     def cursor_field(self) -> str:
         return CUSTOM_INCREMENTAL_CURSOR
+
+    @property
+    def created_date_field(self) -> str:
+        return CUSTOM_DATE_FIELD
