@@ -9,6 +9,7 @@ from time import sleep
 from json import JSONDecodeError
 import logging
 from typing import Any, Iterable, Mapping, MutableMapping, Optional, Tuple, Union
+import re
 
 import requests
 from airbyte_cdk.sources.streams.http import HttpStream
@@ -21,7 +22,7 @@ from source_netsuite.constraints import (
     CUSTOM_INCREMENTAL_CURSOR,
     INCREMENTAL_CURSOR,
     META_PATH,
-    NETSUITE_INPUT_DATE_FORMATS,
+    NETSUITE_INPUT_DATE_FORMATS_MAPPING,
     NETSUITE_OUTPUT_DATETIME_FORMAT,
     OBJECTS_USING_ALT_DATETIME_FIELD,
     RECORD_PATH,
@@ -58,15 +59,12 @@ class NetsuiteStream(HttpStream, ABC):
         super().__init__(authenticator=auth)
 
     primary_key = "id"
-
-    # instance input date format format selector
-    index_datetime_format = 0
-
+    query_datetime_format = "MM/dd/yyyy"  # default format, will be updated by the retry logic
     raise_on_http_errors = True
 
     @property
     def default_datetime_format(self) -> str:
-        return NETSUITE_INPUT_DATE_FORMATS[self.index_datetime_format]
+        return NETSUITE_INPUT_DATE_FORMATS_MAPPING[self.query_datetime_format]
 
     @property
     def name(self) -> str:
@@ -229,15 +227,27 @@ class NetsuiteStream(HttpStream, ABC):
                         sleep(5)
                         return True
 
-                    # handle data-format error
+                    # handle date-format error
                     if "INVALID_PARAMETER" in error_code and "failed with date format" in detail_message:
                         self.logger.warning(f"Stream `{self.name}`: cannot read using date format `{self.default_datetime_format}")
-                        self.index_datetime_format += 1
-                        if self.index_datetime_format < len(NETSUITE_INPUT_DATE_FORMATS):
-                            self.logger.warning(f"Stream `{self.name}`: retry using next date format `{self.default_datetime_format}")
+                        # Extract the required date format pattern from the error message, which appears after 'failed with date format' in quotes
+                        required_datetime_format = re.search(r'failed with date format "([^"]+)"', detail_message)
+
+                        if not required_datetime_format:
+                            self.logger.warning(
+                                f"Stream `{self.name}`: Unable to extract the required date format from the error message. "
+                                f"Error message format may have changed. Full error: {detail_message}"
+                            )
+                            return False
+
+                        format_value = required_datetime_format.group(1)
+
+                        if format_value in NETSUITE_INPUT_DATE_FORMATS_MAPPING:
+                            self.query_datetime_format = format_value
+                            self.logger.warning(f"Stream `{self.name}`: retry using date format `{self.query_datetime_format}`")
                             raise DateFormatExeption
                         else:
-                            self.logger.error(f"DATE FORMAT exception. Cannot read using known formats {NETSUITE_INPUT_DATE_FORMATS}")
+                            self.logger.error(f"DATE FORMAT exception. Cannot query stream {self.name} using known datetime formats")
                             return False
 
                     # handle other known errors
