@@ -51,25 +51,32 @@ connectionSpecification:
       order: 5
       examples: ["customer", "salesorder", "etc"]
       default: []
+    # At most, our destination will be configured to write 500 records, so we don't need to fetch the entire 1000 default
+    limit:
+      type: integer
+      title: Records Per Request
+      description: The number of records to fetch per request. Maximum value is 500.
+      order: 6
+      default: 500
     start_datetime:
       type: string
       title: Start Date
       description: Starting point for your data replication based on Last Modified Date, in format of "YYYY-MM-DDTHH:mm:ssZ"
-      order: 6
+      order: 7
       pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
       examples: ["2024-01-01T00:00:00Z"]
     end_datetime:
       type: string
       title: End Date
       description: Ending point for your data replication, in format of "YYYY-MM-DDTHH:mm:ssZ"
-      order: 7
+      order: 8
       pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
       examples: ["2024-01-01T00:00:00Z"]
     created_datetime:
       type: string
       title: Created Date
       description: Starting point for your data replication based on Created Date, in format of "MM/DD/YYYY". This will default to a year from today, if left blank"
-      order: 8
+      order: 9
       # TODO: we can standardize date inputs to YYYY-MM-DD (and work with UI datepicker) and convert to NS format on the backend
       pattern: "^[0-9]{2}/[0-9]{2}/[0-9]{4}"
       examples: ["01/01/2024"]
@@ -77,11 +84,12 @@ connectionSpecification:
       type: integer
       title: Window in Days
       description: The amount of days used to query the data with date chunks. Set smaller value, if you have lots of data. Minimum value is 2.
-      order: 9
+      order: 10
       default: 30
     retry_concurrency_limit:
       type: boolean
       title: Retry on Concurrency Limit
       description: Whether or not airbyte should retry after encountering error 429 CONCURRENCY_LIMIT_EXCEEDED after waiting 5 seconds.
-      order: 10
+      order: 11
       default: false
+

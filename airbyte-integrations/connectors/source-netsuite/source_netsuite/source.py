@@ -59,17 +59,20 @@ class SourceNetsuite(AbstractSource):
             if duplicates:
                 return False, f'Duplicate record type: {", ".join(duplicates)}'
             # check connectivity to all provided `object_types`
+            errors = []
             for object in object_types:
-
                 # Line items will use the parent object's data
                 object_name = object.lower().removesuffix("_line_items")
                 
                 try:
                     response = session.get(url=base_url + RECORD_PATH + object_name, params={"limit": 1})
                     response.raise_for_status()
-                    return True, None
                 except requests.exceptions.HTTPError as e:
-                    return False, e
+                    errors.append(f"Error checking connection for object {object}: {e}")
+            
+            if errors:
+                return False, "\n".join(errors)
+            return True, None
         else:
             # if `object_types` are not provided, use `Contact` object
             # there should be at least 1 contact available in every NetSuite account by default.
@@ -126,6 +129,7 @@ class SourceNetsuite(AbstractSource):
         created_datetime: str,
         window_in_days: int,
         retry_concurrency_limit: bool,
+        limit: int,
         max_retry: int = 3,
     ) -> Union[NetsuiteStream, IncrementalNetsuiteStream, CustomIncrementalNetsuiteStream]:
 
@@ -138,6 +142,7 @@ class SourceNetsuite(AbstractSource):
             "created_datetime": created_datetime,
             "window_in_days": window_in_days,
             "retry_concurrency_limit": retry_concurrency_limit,
+            "limit": limit,
         }
 
         schema = schemas[object_name]
@@ -208,6 +213,7 @@ class SourceNetsuite(AbstractSource):
                 "created_datetime": config.get("created_datetime"),
                 "window_in_days": config["window_in_days"],
                 "retry_concurrency_limit": config.get("retry_concurrency_limit"),
+                "limit": config.get("limit", 500),
                 "schemas": schemas,
             }
         )

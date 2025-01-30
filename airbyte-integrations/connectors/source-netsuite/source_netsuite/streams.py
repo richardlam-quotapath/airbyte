@@ -45,6 +45,7 @@ class NetsuiteStream(HttpStream, ABC):
         created_datetime: str,
         window_in_days: int,
         retry_concurrency_limit: bool,
+        limit: int = 500,
     ):
         self.object_name = object_name
         self.base_url = base_url
@@ -55,6 +56,7 @@ class NetsuiteStream(HttpStream, ABC):
         )
         self.window_in_days = window_in_days
         self.retry_concurrency_limit = retry_concurrency_limit or False
+        self.limit = limit
         self.schemas = {}  # store subschemas to reduce API calls
         super().__init__(authenticator=auth)
 
@@ -148,7 +150,7 @@ class NetsuiteStream(HttpStream, ABC):
         return lmd_datetime.strftime(self.default_datetime_format)
 
     def request_params(self, next_page_token: Mapping[str, Any] = None, **kwargs) -> MutableMapping[str, Any]:
-        params = {**(next_page_token or {}), **{"limit": 500}}
+        params = {**(next_page_token or {}), **{"limit": self.limit}}
         return params
 
     def fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
@@ -321,20 +323,26 @@ class IncrementalNetsuiteStream(NetsuiteStream):
             yield record
         return {}
 
-    def get_updated_state(
-        self,
-        current_stream_state: MutableMapping[str, Any],
-        latest_record: Mapping[str, Any],
-    ) -> Mapping[str, Any]:
-        latest_cursor = latest_record.get(self.cursor_field, self.start_datetime)
-        current_cursor = current_stream_state.get(self.cursor_field, self.start_datetime)
-        return {self.cursor_field: max(latest_cursor, current_cursor)}
+    def get_updated_state(self, current_stream_state: MutableMapping[str, Any], latest_record: Mapping[str, Any]) -> Mapping[str, Any]:
+        """
+        Return the latest state by comparing the cursor value in the latest record with the stream's most recent state object
+        and returning an updated state object.
+        """
+        # Initialize state with start_datetime if empty
+        if not current_stream_state.get(self.cursor_field):
+            current_stream_state[self.cursor_field] = self.start_datetime
+        
+        # Get cursor value from latest record, defaulting to current state if not present
+        latest_cursor = latest_record.get(self.cursor_field)
+        if latest_cursor:
+            current_stream_state[self.cursor_field] = max(latest_cursor, current_stream_state[self.cursor_field])
+        
+        return current_stream_state
 
     def request_params(
         self, stream_slice: Mapping[str, Any] = None, next_page_token: Mapping[str, Any] = None, **kwargs
     ) -> MutableMapping[str, Any]:
-        # At most, our destination will be configured to write 500 records, so we don't need to fetch the entire 1000 default limit. This might help stabilize the syncs with less data per GET.
-        params = {**(next_page_token or {}), **{"limit": 500}}
+        params = {**(next_page_token or {}), **{"limit": self.limit}}
         # Format the created date query param to match the date format used in the records (determined through retry logic if initial format fails.
         formatted_created_datetime = self.created_datetime.strftime(self.default_datetime_format)
 
@@ -392,11 +400,20 @@ class LineItemsIncrementalNetsuiteStream(IncrementalNetsuiteStream):
         window_in_days: int,
         retry_concurrency_limit: bool,
         line_item_name: str,
+        limit: int = 500,
     ):
-        self.line_item_name = line_item_name
         super().__init__(
-            auth, object_name, base_url, start_datetime, end_datetime, created_datetime, window_in_days, retry_concurrency_limit
+            auth=auth,
+            object_name=object_name,
+            base_url=base_url,
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            created_datetime=created_datetime,
+            window_in_days=window_in_days,
+            retry_concurrency_limit=retry_concurrency_limit,
+            limit=limit,
         )
+        self.line_item_name = line_item_name
 
     @property
     def name(self) -> str:
