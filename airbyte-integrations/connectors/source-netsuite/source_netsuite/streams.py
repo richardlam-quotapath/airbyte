@@ -48,7 +48,8 @@ class NetsuiteStream(HttpStream, ABC):
         self.object_name = object_name
         self.base_url = base_url
         self.start_datetime = start_datetime
-        self.end_datetime = end_datetime or datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Initialize to 1 day from now to include records modified today
+        self.end_datetime = end_datetime or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.created_datetime = (
             datetime.strptime(created_datetime, "%m/%d/%Y") if created_datetime else datetime.now() - timedelta(days=365)
         )
@@ -332,7 +333,7 @@ class IncrementalNetsuiteStream(NetsuiteStream):
         if stream_slice:
             params.update(
                 {
-                    "q": f'{self.created_date_field} ON_OR_AFTER "{formatted_created_datetime}" AND {self.cursor_field} ON_OR_AFTER "{stream_slice["start"]}" AND {self.cursor_field} BEFORE "{stream_slice["end"]}"'
+                    "q": f'{self.created_date_field} ON_OR_AFTER "{formatted_created_datetime}" AND {self.cursor_field} ON_OR_AFTER "{stream_slice["start"]}" AND {self.cursor_field} ON_OR_BEFORE "{stream_slice["end"]}"'
                 }
             )
 
