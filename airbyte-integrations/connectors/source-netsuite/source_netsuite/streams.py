@@ -4,16 +4,16 @@
 
 
 from abc import ABC
+import asyncio
 from datetime import date, datetime, timedelta
 from time import sleep
 from json import JSONDecodeError
-import logging
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, Tuple, Union
+import time
+from typing import Any, Iterable, Mapping, MutableMapping, Optional, Union
 
 import requests
 from airbyte_cdk.sources.streams.http import HttpStream
 from requests_oauthlib import OAuth1
-from airbyte_cdk.sources.streams.http.exceptions import DefaultBackoffException, UserDefinedBackoffException
 from source_netsuite.constraints import (
     CREATED_DATETIME,
     CREATED_DATETIME_ALT,
@@ -31,6 +31,9 @@ from source_netsuite.constraints import (
     USLESS_SCHEMA_ELEMENTS,
 )
 from source_netsuite.errors import NETSUITE_ERRORS_MAPPING, DateFormatExeption
+import aiohttp
+
+RecordType = Mapping[str, Any]
 
 
 class NetsuiteStream(HttpStream, ABC):
@@ -44,6 +47,7 @@ class NetsuiteStream(HttpStream, ABC):
         created_datetime: str,
         window_in_days: int,
         retry_concurrency_limit: bool,
+        concurrency_limit: int = 2,
     ):
         self.object_name = object_name
         self.base_url = base_url
@@ -56,6 +60,8 @@ class NetsuiteStream(HttpStream, ABC):
         self.window_in_days = window_in_days
         self.retry_concurrency_limit = retry_concurrency_limit or False
         self.schemas = {}  # store subschemas to reduce API calls
+        self.oauth1 = auth
+        self.concurrency_limit = concurrency_limit
         super().__init__(authenticator=auth)
 
     primary_key = "id"
@@ -154,7 +160,7 @@ class NetsuiteStream(HttpStream, ABC):
         params = {**(next_page_token or {}), **{"limit": 500}}
         return params
 
-    def fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+    def series_fetch_record(self, record: Mapping[str, Any], request_kwargs: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
         url = record["links"][0]["href"]
         args = {"method": "GET", "url": url, "params": {"expandSubResources": True}}
         prep_req = self._session.prepare_request(requests.Request(**args))
@@ -167,6 +173,80 @@ class NetsuiteStream(HttpStream, ABC):
         if response.status_code == requests.codes.ok:
             yield response.json()
 
+    async def parallel_fetch_record(self, record: RecordType, session: aiohttp.ClientSession) -> Optional[Mapping[str, Any]]:
+        url = record["links"][0]["href"]
+        params = {"expandSubResources": True}
+
+        auth: OAuth1 = self.oauth1
+
+        try:            
+            req = requests.Request("GET", url, params=params)
+
+            # Sign the request with OAuth1
+            prepped_req = auth(req.prepare())
+
+            # Extract signed headers and params from the prepared request, properly decode bytes
+            signed_headers = {}
+            for k, v in prepped_req.headers.items():
+                # Decode bytes to string if needed
+                key = k.decode() if isinstance(k, bytes) else k
+                value = v.decode() if isinstance(v, bytes) else v
+                signed_headers[key] = value
+
+            final_url = prepped_req.url  # This will have the signed params included
+
+            self.logger.info(f"Fetching record {url}")
+            async with session.get(final_url, headers=signed_headers) as response:
+                self.logger.info(f"Status code {response.status} for request: {url}")
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    text = await response.text()
+                    self.logger.warning(
+                        f"Failed to fetch record {url}: Status {response.status} Response Text: {text} Response Reason: {response.reason}"
+                    )
+                    return None
+        except Exception as e:
+            self.logger.error(f"Error fetching record from {url}: {str(e)}")
+            return None
+
+    async def fetch_all_records(self, records: Iterable[RecordType]) -> tuple[list, list[RecordType]]:
+        """Fetches all records in parallel and saves any failed records to retry later"""
+        failed_records: list[RecordType] = []
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            semaphore = asyncio.Semaphore(self.concurrency_limit)
+
+            async def fetch_with_semaphore(record: RecordType):
+                """Limit the number of concurrent requests"""
+                async with semaphore:
+                    try:
+                        result = await self.parallel_fetch_record(record, session)
+                        if result is None:
+                            failed_records.append(record)
+                        return result
+                    except Exception as e:
+                        self.logger.error(f"Error in parallel fetch: {str(e)}")
+                        failed_records.append(record)
+                        return None
+
+            tasks = [fetch_with_semaphore(record) for record in records]
+            results = await asyncio.gather(*tasks)
+            return [r for r in results if r is not None], failed_records
+
+    async def retry_failed_records(self, failed_records: list) -> list:
+        results = []
+        async with aiohttp.ClientSession() as session:
+            for record in failed_records:
+                self.logger.info(f"Retrying failed record with URL: {record['links'][0]['href']}")
+                try:
+                    result = await self.fetch_record(record, session)
+                    if result is not None:
+                        results.append(result)
+                except Exception as e:
+                    self.logger.error(f"Failed to fetch record even in sequential retry: {str(e)}")
+            return results
+
     def parse_response(
         self,
         response: requests.Response,
@@ -175,33 +255,43 @@ class NetsuiteStream(HttpStream, ABC):
         next_page_token: Mapping[str, Any] = None,
         **kwargs,
     ) -> Iterable[Mapping]:
-        records = response.json().get("items", [])
+        records: RecordType = response.json().get("items", [])
         totalResults = response.json().get("totalResults")
         self.logger.info(f"Total records found for current query: {totalResults}")
 
-        request_kwargs = self.request_kwargs(stream_slice, next_page_token)
+        request_kwargs = self.request_kwargs(next_page_token)
 
         if records:
-            errored_records = []
-            for record in records:
-                # make sub-requests for each record fetched
-                try:
-                    yield from self.fetch_record(record, request_kwargs)
-                except Exception as e:
-                    url = record.get("links", [{}])[0].get("href")
-                    self.logger.info(f"Encountered the error below while fetching url {url}. Adding to error list.")
-                    self.logger.info(e)
-                    errored_records.append(record)
-                    continue
+            start_time = time.time()
+            self.logger.info(f"Starting async fetch sub-records")
 
-            if errored_records:
-                self.logger.info(f"BEGIN: Fetching {len(errored_records)} records in error list.")
-                for record in errored_records:
-                    try:
-                        yield from self.fetch_record(record, request_kwargs)
-                    except Exception as e:
-                        self.logger.info(f"Encountered error again while fetching url {url}. Skipping record.")
-                        continue
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Get parallel results and failed records
+                results, failed_records = loop.run_until_complete(self.fetch_all_records(records))
+
+                # First yield successful parallel results
+                for result in results:
+                    if result is not None:
+                        yield result
+
+                # If there are failed records, retry them sequentially
+                if failed_records:
+                    self.logger.info(f"BEGIN: Fetching {len(failed_records)} records in error list sequentially.")
+                    for record in failed_records:
+                        try:
+                            yield from self.series_fetch_record(record, request_kwargs)
+                        except Exception as e:
+                            self.logger.info(
+                                f"Encountered error {e} while fetching record {record.get('links', [{}])[0].get('href')}. Skipping record."
+                            )
+                            continue
+            finally:
+                loop.close()
+
+            end_time = time.time()
+            self.logger.info(f"Getting records step took {end_time - start_time} seconds")
 
     def should_retry(self, response: requests.Response) -> bool:
         if response.status_code in NETSUITE_ERRORS_MAPPING.keys():

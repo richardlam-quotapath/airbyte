@@ -127,6 +127,7 @@ class SourceNetsuite(AbstractSource):
         window_in_days: int,
         retry_concurrency_limit: bool,
         max_retry: int = 3,
+        concurrency_limit: int = 2,
     ) -> Union[NetsuiteStream, IncrementalNetsuiteStream, CustomIncrementalNetsuiteStream]:
 
         input_args = {
@@ -138,6 +139,7 @@ class SourceNetsuite(AbstractSource):
             "created_datetime": created_datetime,
             "window_in_days": window_in_days,
             "retry_concurrency_limit": retry_concurrency_limit,
+            "concurrency_limit": concurrency_limit,
         }
 
         schema = schemas[object_name]
@@ -209,6 +211,7 @@ class SourceNetsuite(AbstractSource):
                 "window_in_days": config["window_in_days"],
                 "retry_concurrency_limit": config.get("retry_concurrency_limit"),
                 "schemas": schemas,
+                "concurrency_limit": config.get("concurrency_limit"),
             }
         )
         # build streams

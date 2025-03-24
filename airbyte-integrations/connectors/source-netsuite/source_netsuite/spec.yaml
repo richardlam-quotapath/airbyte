@@ -85,3 +85,9 @@ connectionSpecification:
       description: Whether or not airbyte should retry after encountering error 429 CONCURRENCY_LIMIT_EXCEEDED after waiting 5 seconds.
       order: 10
       default: false
+    concurrency_limit:
+      type: integer
+      title: Concurrency Limit
+      description: The number of concurrent requests to make to Netsuite.
+      order: 11
+      default: 2
