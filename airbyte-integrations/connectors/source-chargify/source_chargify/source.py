@@ -4,6 +4,7 @@
 
 
 from abc import ABC
+import logging
 from typing import Any, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
@@ -13,6 +14,8 @@ from airbyte_cdk.models import SyncMode
 from airbyte_cdk.sources import AbstractSource
 from airbyte_cdk.sources.streams import Stream
 from airbyte_cdk.sources.streams.http import HttpStream
+
+logger = logging.getLogger("airbyte")
 
 
 # Basic full refresh stream
@@ -81,6 +84,28 @@ class Customers(ChargifyStream):
         customers = response.json()
         for customer in customers:
             yield customer["customer"]
+
+
+class SubscriptionsCustomFields(ChargifyStream):
+
+    primary_key = "id"
+
+    def path(self, **kwargs) -> str:
+        return "subscriptions/metadata.json"
+
+    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
+        yield from response.json().get("metadata", [])
+
+
+class CustomersCustomFields(ChargifyStream):
+
+    primary_key = "id"
+
+    def path(self, **kwargs) -> str:
+        return "customers/metadata.json"
+
+    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
+        yield from response.json().get("metadata", [])
 
 
 class Subscriptions(ChargifyStream):
@@ -227,7 +252,9 @@ class SourceChargify(AbstractSource):
         authenticator = self.get_basic_auth(config)
         return [
             Customers(authenticator, domain=config["domain"]),
+            CustomersCustomFields(authenticator, domain=config["domain"]),
             Subscriptions(authenticator, domain=config["domain"]),
+            SubscriptionsCustomFields(authenticator, domain=config["domain"]),
             Invoices(authenticator, domain=config["domain"]),
             Coupons(authenticator, domain=config["domain"]),
             Components(authenticator, domain=config["domain"]),
