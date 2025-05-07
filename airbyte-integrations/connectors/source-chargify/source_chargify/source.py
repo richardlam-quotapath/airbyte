@@ -68,6 +68,22 @@ class ChargifyStream(HttpStream, ABC):
         yield from response.json()
 
 
+class ChargifyCustomFieldsStream(ChargifyStream):
+
+    primary_key = "id"
+
+    def next_page_token(self, response: requests.Response) -> Optional[Mapping[str, Any]]:
+        data = response.json()
+        current_page, total_pages = data.get("current_page"), data.get("total_pages")
+
+        if current_page and total_pages and current_page < total_pages:
+            return {"page": current_page + 1, "per_page": self.PER_PAGE}
+        return None
+
+    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
+        yield from response.json().get("metadata", [])
+
+
 class Customers(ChargifyStream):
 
     primary_key = "id"
@@ -86,26 +102,16 @@ class Customers(ChargifyStream):
             yield customer["customer"]
 
 
-class SubscriptionsCustomFields(ChargifyStream):
-
-    primary_key = "id"
+class SubscriptionsCustomFields(ChargifyCustomFieldsStream):
 
     def path(self, **kwargs) -> str:
         return "subscriptions/metadata.json"
 
-    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
-        yield from response.json().get("metadata", [])
 
-
-class CustomersCustomFields(ChargifyStream):
-
-    primary_key = "id"
+class CustomersCustomFields(ChargifyCustomFieldsStream):
 
     def path(self, **kwargs) -> str:
         return "customers/metadata.json"
-
-    def parse_response(self, response: requests.Response, **kwargs) -> Iterable[Mapping]:
-        yield from response.json().get("metadata", [])
 
 
 class Subscriptions(ChargifyStream):
